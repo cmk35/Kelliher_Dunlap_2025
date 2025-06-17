@@ -1,0 +1,863 @@
+---
+title: "R analyses for Fungal Biology MS"
+author: "Tina Kelliher"
+date: "3/9/2025"
+output: html_document
+---
+
+## If re-running these analyses, change the PATH below to match this directory downloaded from git onto local machine
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(stringr)
+
+setwd("~/Downloads/R_analyses_figures/")
+
+```
+
+## Read in data to plot and analyze amplitude
+
+Biological replicate 96-well plate runs containing at least technical triplicates per genotype were performed at Dartmouth (rep1-2) and UMass Boston (rep3-4). Race tubes under the CCD camera were run over 2 experiments with N = 3 biological/technical replicates per genotype
+
+96-well plate experiment dates: 2019-07-30 (plate3); 2019-09-11 (plate2); 2025-01-14 (plate1); 2025-01-23 (plate1)
+
+Raw 96-well plate data were background corrected using ImageJ macro (Luis Larrondo)
+
+Race tube experiment dates: 2025-02-17 & 2025-02-26
+
+Raw RT data were derived from the average signal across the whole tube at each time point using ImageJ macro (Luis Larrondo)
+
+```{r}
+
+rep1_96 <- as.data.frame(read.csv("./CCD_camera_data/2019-07-30_plate3_bckgr.csv", header=T))
+
+rep2_96 <- as.data.frame(read.csv("./CCD_camera_data/2019-09-11_plate2_bckgr.csv", header=T))
+
+rep3_96 <- as.data.frame(read.csv("./CCD_camera_data/2025-01-14_plate1_bckgr.csv", header=T))
+
+rep4_96 <- as.data.frame(read.csv("./CCD_camera_data/2025-01-23_plate1_bckgr.csv", header=T))
+
+rep1_RT <- as.data.frame(read.csv("./CCD_camera_data/2025-02-17_wholeTube.csv", header=T))
+
+rep2_RT <- as.data.frame(read.csv("./CCD_camera_data/2025-02-26_wholeTube.csv", header=T))
+
+periods_96_TOR <- as.data.frame(read.table("./CCD_camera_data/2025-01_96-wells_periodCalls_TOR.txt", header=T))
+
+periods_96_PRX <- as.data.frame(read.table("./CCD_camera_data/2025-01_96-wells_periodCalls_PRX.txt", header=T))
+
+periods_RT <- as.data.frame(read.table("./CCD_camera_data/2025-02_RTs_periodCalls.txt", header=T))
+
+```
+
+## Function to smooth the luc trace data with a weighted mean of 3 time points
+
+[1,2,1] sliding window normalization inspired by Hannah De los Santos code base (GitHub: https://github.com/delosh653/)
+
+```{r}
+
+ts_3_weight_mean <- function(ts_data){
+  
+  samples <- as.numeric(length(ts_data))
+  
+  output <- matrix(nrow=samples, ncol=1)
+  
+  for(i in 1:nrow(output)){
+    
+    if(i==1){
+      value <- ts_data[i]
+      value_window <- ts_data[1:3]
+      #value_window <- rep.int(ts_data[i], 3)
+      cat <- c(value, value_window)
+      window_mean <- mean(cat)
+      output[i,1] <- window_mean
+      
+    } else if(i==2){
+      value <- ts_data[i]
+      value_window <- ts_data[1:3]
+      cat <- c(value, value_window)
+      window_mean <- mean(cat)
+      output[i,1] <- window_mean
+      
+    } else if(i==as.numeric(samples-1)){
+      value <- ts_data[i]
+      max_count <- as.numeric(samples)
+      max_count_2 <- max_count - 2
+      value_window <- ts_data[max_count_2:max_count]
+      cat <- c(value, value_window)
+      window_mean <- mean(cat)
+      output[i,1] <- window_mean
+      
+    } else if(i==as.numeric(samples)){
+      value <- ts_data[i]
+      max_count <- as.numeric(samples)
+      max_count_2 <- max_count - 2
+      value_window <- ts_data[max_count_2:max_count]
+      cat <- c(value, value_window)
+      window_mean <- mean(cat)
+      output[i,1] <- window_mean
+      
+    } else {
+      cur_count <- as.numeric(i)
+      cur_count_p <- cur_count + 1
+      cur_count_m <- cur_count - 1
+      value_window <- ts_data[cur_count_m:cur_count_p]
+      window_mean <- weighted.mean(value_window, c(1,2,1))
+      output[i,1] <- window_mean
+      
+    }
+    
+  }
+  
+  return(output)
+  
+}
+
+```
+
+## Function to subset each luc trace data file by genotype, smooth each trace, compute a mean for each genotype, and compute a standard deviation for each genotype
+
+Returns 1 average trace per strain with biological replicates $\pm$ standard deviation error bars
+
+```{r}
+
+compile_luc_traces <- function(data) {
+  
+  data_labels_all <- names(data)
+  
+  data_labels_samples <- data_labels_all[2:length(data_labels_all)]
+  ## assumes that the first column is time points
+  
+  labels_to_collapse <- gsub("\\..*", "", data_labels_samples)
+  ## get rid of the .\d+ that R adds to column names when genotype is the same
+  
+  unique_strains <- unique(labels_to_collapse)
+  
+  data_noTP <- data[,2:ncol(data)]
+  
+  dataSmooth <- matrix(ncol=ncol(data_noTP), nrow=nrow(data_noTP))
+  
+  for(i in 1:ncol(data_noTP)){
+    
+    curCol <- data_noTP[,i]
+    
+    curMovAvg <- ts_3_weight_mean(curCol)
+    ## function is above chunk
+    
+    dataSmooth[,i] <- curMovAvg
+  }
+  
+  avg_data <- matrix(ncol=length(unique_strains), nrow=nrow(data))
+  
+  stdev_data <- matrix(ncol=length(unique_strains), nrow=nrow(data))
+  
+  plus_data <- matrix(ncol=length(unique_strains), nrow=nrow(data))
+  
+  minus_data <- matrix(ncol=length(unique_strains), nrow=nrow(data))
+  
+  for(i in 1:length(unique_strains)){
+    curr_set <- grep(paste("^", unique_strains[i], sep=""), data_labels_samples)
+    
+    curr_data <- dataSmooth[ ,curr_set]
+    
+    curr_data_avg <- apply(curr_data, 1, mean)
+    
+    curr_data_stdev <- apply(curr_data, 1, sd)
+    
+    curr_data_plus <- curr_data_avg + curr_data_stdev
+    
+    curr_data_minus <- curr_data_avg - curr_data_stdev
+    
+    avg_data[,i] <- curr_data_avg
+    
+    stdev_data[,i] <- curr_data_stdev
+    
+    plus_data[,i] <- curr_data_plus
+    
+    minus_data[,i] <- curr_data_minus
+    
+  }
+  
+  avg_data <- as.data.frame(avg_data)
+  
+  names(avg_data) <- paste(unique_strains, "_avg", sep="")
+  
+  stdev_data <- as.data.frame(stdev_data)
+  
+  names(stdev_data) <- paste(unique_strains, "_sd", sep="")
+  
+  plus_data <- as.data.frame(plus_data)
+  
+  names(plus_data) <- paste(unique_strains, "_plus", sep="")
+  
+  minus_data <- as.data.frame(minus_data)
+  
+  names(minus_data) <- paste(unique_strains, "_minus", sep="")
+  
+  final_out <- cbind(avg_data, stdev_data, plus_data, minus_data)
+
+  return(final_out)
+  
+}
+
+```
+
+## Generate individual graphs for each genotype from 96-well plate data
+
+Biological replicate 3 was run at UMass Boston with all 4 mutants of interest to this study
+
+Each technical replicate well is smoothed and averaged together using the above function
+
+```{r, fig.width=7, fig.height=5.5}
+
+xlabels<-seq(from=0,to=120,by=12)
+
+horolines<-seq(from=0,to=120,by=24)
+
+rep3_96_smooth_avg <- compile_luc_traces(rep3_96)
+
+## the genotype column values below are somewhat hard-coded
+
+######################################################
+
+## wild-type control and FGSC16041 (delta gtr-2/NCU00376)
+
+plot(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$wildtype_avg), xlim=c(0,120), ylim=c(0,1700), xaxt="n", type="l", lwd=5, col="black", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(rep3_96$Frame), y0=as.numeric(rep3_96_smooth_avg$wildtype_plus), y1=as.numeric(rep3_96_smooth_avg$wildtype_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$wildtype_avg), lty="solid", lwd=5, col="black")
+
+arrows(x0=as.numeric(rep3_96$Frame), y0=as.numeric(rep3_96_smooth_avg$X16041_plus), y1=as.numeric(rep3_96_smooth_avg$X16041_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$X16041_avg), lty="solid", lwd=5, col="turquoise")
+
+legend("topright", c("wild-type", "gtr-2"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("black", "turquoise"))
+
+######################################################
+
+## wild-type control and FGSC18029 (delta vta/NCU05950)
+
+plot(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$wildtype_avg), xlim=c(0,120), ylim=c(0,1700), xaxt="n", type="l", lwd=5, col="black", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(rep3_96$Frame), y0=as.numeric(rep3_96_smooth_avg$wildtype_plus), y1=as.numeric(rep3_96_smooth_avg$wildtype_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$wildtype_avg), lty="solid", lwd=5, col="black")
+
+arrows(x0=as.numeric(rep3_96$Frame), y0=as.numeric(rep3_96_smooth_avg$X18029_plus), y1=as.numeric(rep3_96_smooth_avg$X18029_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$X18029_avg), lty="solid", lwd=5, col="turquoise3")
+
+legend("topright", c("wild-type", "vta"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("black", "turquoise3"))
+
+######################################################
+
+## wild-type control and FGSC15040 (delta NCU03151 / PRDX6-like)
+
+plot(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$wildtype_avg), xlim=c(0,120), ylim=c(0,1500), xaxt="n", type="l", lwd=5, col="black", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(rep3_96$Frame), y0=as.numeric(rep3_96_smooth_avg$wildtype_plus), y1=as.numeric(rep3_96_smooth_avg$wildtype_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$wildtype_avg), lty="solid", lwd=5, col="black")
+
+arrows(x0=as.numeric(rep3_96$Frame), y0=as.numeric(rep3_96_smooth_avg$X15040_plus), y1=as.numeric(rep3_96_smooth_avg$X15040_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$X15040_avg), lty="solid", lwd=5, col="deepskyblue1")
+
+legend("topright", c("wild-type", "NCU03151"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("black", "deepskyblue1"))
+
+######################################################
+
+## wild-type control and FGSC20011 (delta NCU06031 / rhd / PRDX5-like)
+
+plot(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$wildtype_avg), xlim=c(0,120), ylim=c(0,1500), xaxt="n", type="l", lwd=5, col="black", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(rep3_96$Frame), y0=as.numeric(rep3_96_smooth_avg$wildtype_plus), y1=as.numeric(rep3_96_smooth_avg$wildtype_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$wildtype_avg), lty="solid", lwd=5, col="black")
+
+arrows(x0=as.numeric(rep3_96$Frame), y0=as.numeric(rep3_96_smooth_avg$X20011_plus), y1=as.numeric(rep3_96_smooth_avg$X20011_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep3_96$Frame), y=as.numeric(rep3_96_smooth_avg$X20011_avg), lty="solid", lwd=5, col="royalblue1")
+
+legend("topright", c("wild-type", "NCU06031"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("black", "royalblue1"))
+
+######################################################
+
+```
+
+## Backup: Biological Replicate 4
+
+```{r, fig.width=7, fig.height=5.5}
+
+xlabels<-seq(from=0,to=120,by=12)
+
+horolines<-seq(from=0,to=120,by=24)
+
+rep4_96_smooth_avg <- compile_luc_traces(rep4_96)
+
+## the genotype column values below are somewhat hard-coded
+
+######################################################
+
+## wild-type control and FGSC16041 (delta gtr-2/NCU00376)
+
+plot(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$wildtype_avg), xlim=c(0,120), ylim=c(0,1200), xaxt="n", type="l", lwd=5, col="black", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(rep4_96$Frame), y0=as.numeric(rep4_96_smooth_avg$wildtype_plus), y1=as.numeric(rep4_96_smooth_avg$wildtype_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$wildtype_avg), lty="solid", lwd=5, col="black")
+
+arrows(x0=as.numeric(rep4_96$Frame), y0=as.numeric(rep4_96_smooth_avg$X16041_plus), y1=as.numeric(rep4_96_smooth_avg$X16041_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$X16041_avg), lty="solid", lwd=5, col="hotpink1")
+
+legend("topright", c("wild-type", "gtr-2"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("black", "hotpink1"))
+
+######################################################
+
+## wild-type control and FGSC18029 (delta vta/NCU05950)
+
+plot(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$wildtype_avg), xlim=c(0,120), ylim=c(0,1200), xaxt="n", type="l", lwd=5, col="black", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(rep4_96$Frame), y0=as.numeric(rep4_96_smooth_avg$wildtype_plus), y1=as.numeric(rep4_96_smooth_avg$wildtype_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$wildtype_avg), lty="solid", lwd=5, col="black")
+
+arrows(x0=as.numeric(rep4_96$Frame), y0=as.numeric(rep4_96_smooth_avg$X18029_plus), y1=as.numeric(rep4_96_smooth_avg$X18029_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$X18029_avg), lty="solid", lwd=5, col="hotpink2")
+
+legend("topright", c("wild-type", "vta"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("black", "hotpink2"))
+
+######################################################
+
+## wild-type control and FGSC15040 (delta NCU03151 / PRDX6-like)
+
+plot(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$wildtype_avg), xlim=c(0,120), ylim=c(0,1350), xaxt="n", type="l", lwd=5, col="black", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(rep4_96$Frame), y0=as.numeric(rep4_96_smooth_avg$wildtype_plus), y1=as.numeric(rep4_96_smooth_avg$wildtype_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$wildtype_avg), lty="solid", lwd=5, col="black")
+
+arrows(x0=as.numeric(rep4_96$Frame), y0=as.numeric(rep4_96_smooth_avg$X15040_plus), y1=as.numeric(rep4_96_smooth_avg$X15040_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$X15040_avg), lty="solid", lwd=5, col="hotpink3")
+
+legend("topright", c("wild-type", "NCU03151"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("black", "hotpink3"))
+
+######################################################
+
+## wild-type control and FGSC20011 (delta NCU06031 / rhd / PRDX5-like)
+
+plot(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$wildtype_avg), xlim=c(0,120), ylim=c(0,1350), xaxt="n", type="l", lwd=5, col="black", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(rep4_96$Frame), y0=as.numeric(rep4_96_smooth_avg$wildtype_plus), y1=as.numeric(rep4_96_smooth_avg$wildtype_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$wildtype_avg), lty="solid", lwd=5, col="black")
+
+arrows(x0=as.numeric(rep4_96$Frame), y0=as.numeric(rep4_96_smooth_avg$X20011_plus), y1=as.numeric(rep4_96_smooth_avg$X20011_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(rep4_96$Frame), y=as.numeric(rep4_96_smooth_avg$X20011_avg), lty="solid", lwd=5, col="hotpink4")
+
+legend("topright", c("wild-type", "NCU06031"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("black", "hotpink4"))
+
+######################################################
+
+```
+
+## Report the average +/- standard deviation period call for each genotype from 96-well plate data
+
+96-well plate experiment dates: 2019-07-30 (plate3); 2019-09-11 (plate2); 2025-01-14 (plate1); 2025-01-23 (plate1)
+
+Replicates 1 & 2 (Dartmouth) contained data on the PRX mutants as a follow-up to ISFUS3
+
+Replicates 3 & 4 (UMass Boston) contained data on all 4 mutants of interest to this study
+
+Period-call data were separated by mTOR/PRX genotypes to make a fair comparison to WT control period calls in each case. Note that UMass Boston data seem to damp slightly more than older Dartmouth runs, which results in very slight period lengthening
+
+```{r}
+
+control_TOR <- periods_96_TOR[which(periods_96_TOR$Strain=="wildtype"), ]
+
+gtr2 <- periods_96_TOR[which(periods_96_TOR$Strain=="16041"), ]
+
+vta <- periods_96_TOR[which(periods_96_TOR$Strain=="18029"), ]
+
+control_PRX <- periods_96_PRX[which(periods_96_PRX$Strain=="wildtype"), ]
+
+NCU03151 <- periods_96_PRX[which(periods_96_PRX$Strain=="15040"), ]
+
+NCU06031 <- periods_96_PRX[which(periods_96_PRX$Strain=="20011"), ]
+
+print(paste("period length of mTOR controls:", round(mean(as.numeric(control_TOR$Period_Avg3)), digits=1), "+/-", round(sd(as.numeric(control_TOR$Period_Avg3)), digits=1), "from N =", nrow(control_TOR), "biological/technical replicates", sep=" "))
+
+print(paste("period length of delta gtr2 FGSC16041:", round(mean(as.numeric(gtr2$Period_Avg3)), digits=1), "+/-", round(sd(as.numeric(gtr2$Period_Avg3)), digits=1), "from N =", nrow(gtr2), "biological/technical replicates", sep=" "))
+
+print(paste("period length of delta vta FGSC18029:", round(mean(as.numeric(vta$Period_Avg3)), digits=1), "+/-", round(sd(as.numeric(vta$Period_Avg3)), digits=1), "from N =", nrow(vta), "biological/technical replicates", sep=" "))
+
+t.test(as.numeric(control_TOR$Period_Avg3), as.numeric(gtr2$Period_Avg3))
+
+t.test(as.numeric(control_TOR$Period_Avg3), as.numeric(vta$Period_Avg3))
+
+t.test(as.numeric(gtr2$Period_Avg3), as.numeric(vta$Period_Avg3))
+
+print(paste("period length of PRX controls:", round(mean(as.numeric(control_PRX$Period_Avg3)), digits=1), "+/-", round(sd(as.numeric(control_PRX$Period_Avg3)), digits=1), "from N =", nrow(control_PRX), "biological/technical replicates", sep=" "))
+
+print(paste("period length of delta NCU03151 FGSC15040:", round(mean(as.numeric(NCU03151$Period_Avg3)), digits=1), "+/-", round(sd(as.numeric(NCU03151$Period_Avg3)), digits=1), "from N =", nrow(NCU03151), "biological/technical replicates", sep=" "))
+
+print(paste("period length of delta NCU06031 FGSC20011:", round(mean(as.numeric(NCU06031$Period_Avg3)), digits=1), "+/-", round(sd(as.numeric(NCU06031$Period_Avg3)), digits=1), "from N =", nrow(NCU06031), "biological/technical replicates", sep=" "))
+
+t.test(as.numeric(control_PRX$Period_Avg3), as.numeric(NCU03151$Period_Avg3))
+
+t.test(as.numeric(control_PRX$Period_Avg3), as.numeric(NCU06031$Period_Avg3))
+
+t.test(as.numeric(NCU03151$Period_Avg3), as.numeric(NCU06031$Period_Avg3))
+
+```
+
+## For 96-well plate mTOR experiments only, compute the amplitude of the luciferase rhythm on days 1, 2, and 3 in mTOR mutants versus wild-type control
+
+As indicated above, use only rep3 and rep4 data for these comparisons and plot
+
+Formula for amplitude: (peak - trough) / 2
+
+Using above sets of graphs:
+
+Day 1 = hours 8 - 24; trough # 1 and peak # 1
+Day 2 = hours 27 - 44; trough # 2 and peak # 2
+Day 3 = hours 50 - 68; trough # 3 and peak # 3
+
+```{r, fig.width=7, fig.height=5.5}
+
+compute_amplitude <- function(data){
+  
+  data_day1 <- data[9:25, 2:ncol(data)]
+  data_day2 <- data[28:45, 2:ncol(data)]
+  data_day3 <- data[51:69, 2:ncol(data)]
+  ## row indices are offset by 1 because row 1 = TP 0 hours
+  ## remove the first column because it contains time points not data of interest
+  
+  day_1_peak <- as.numeric(apply(data_day1, 2, max))
+  day_2_peak <- as.numeric(apply(data_day2, 2, max))
+  day_3_peak <- as.numeric(apply(data_day3, 2, max))
+  
+  day_1_trough <- as.numeric(apply(data_day1, 2, min))
+  day_2_trough <- as.numeric(apply(data_day2, 2, min))
+  day_3_trough <- as.numeric(apply(data_day3, 2, min))
+  
+  day_1_amp <- (day_1_peak - day_1_trough) / 2
+  day_2_amp <- (day_2_peak - day_2_trough) / 2
+  day_3_amp <- (day_3_peak - day_3_trough) / 2
+  
+  output <- matrix(ncol=ncol(data_day1), nrow=4)
+  
+  output[1,] <- names(data_day1)
+  output[2,] <- day_1_amp
+  output[3,] <- day_2_amp
+  output[4,] <- day_3_amp
+  
+  final_output <- as.data.frame(output[2:4, ], row.names=c("day_1", "day_2", "day_3"))
+  
+  names(final_output) <- output[1, ]
+  
+  final_output_sorted <- final_output[, sort(names(final_output))]
+  
+  return(final_output_sorted)
+
+}
+
+rep3_amps <- compute_amplitude(rep3_96)
+
+rep4_amps <- compute_amplitude(rep4_96)
+
+## the lines below are hard coded for each genotype of interest; reps3&4 camera plates were set up in the exact same way
+## WT = cols 1-12
+## gtr2 = cols 19-30
+## vta = cols 31-42
+
+control_TOR_amps <- cbind(rep3_amps[1:12], rep4_amps[1:12])
+
+vta_amps <- cbind(rep3_amps[31:42], rep4_amps[31:42])
+
+control_TOR_amps_mtx <- matrix(as.numeric(unlist(as.data.frame(control_TOR_amps))), nrow=nrow(control_TOR_amps))
+
+vta_amps_mtx <- matrix(as.numeric(unlist(as.data.frame(vta_amps))), nrow=nrow(vta_amps))
+
+control_TOR_amps_avg <- apply(as.matrix(control_TOR_amps_mtx), 1, mean)
+
+vta_amps_avg <- apply(vta_amps_mtx, 1, mean)
+
+max_val <- max(c(control_TOR_amps_mtx, vta_amps_mtx))
+
+plot_mtx <- matrix(nrow=6, ncol=24)
+plot_mtx[1,] <- 1
+plot_mtx[2,] <- 2
+plot_mtx[3,] <- 3
+plot_mtx[4,] <- 4
+plot_mtx[5,] <- 5
+plot_mtx[6,] <- 6
+plot_mtx_jitter <- jitter(plot_mtx, amount=0.25)
+
+barx <- barplot(c(control_TOR_amps_avg, vta_amps_avg), ylim=c(0, max_val+max_val*0.1), col=c("gray15", "gray30", "gray60", "turquoise4", "turquoise3", "turquoise2"), width=c(0.9, 0.9, 0.9, 0.9, 0.9, 0.9))
+
+points(x=plot_mtx_jitter[1,], y=control_TOR_amps_mtx[1,], pch=16)
+points(x=plot_mtx_jitter[2,], y=control_TOR_amps_mtx[2,], pch=15)
+points(x=plot_mtx_jitter[3,], y=control_TOR_amps_mtx[3,], pch=17)
+points(x=plot_mtx_jitter[4,], y=vta_amps_mtx[1,], pch=16)
+points(x=plot_mtx_jitter[5,], y=vta_amps_mtx[2,], pch=15)
+points(x=plot_mtx_jitter[6,], y=vta_amps_mtx[3,], pch=17)
+
+barx <- barplot(c(control_TOR_amps_avg[1], vta_amps_avg[1], control_TOR_amps_avg[2], vta_amps_avg[2], control_TOR_amps_avg[3], vta_amps_avg[3]), ylim=c(0, max_val+max_val*0.1), col=c("gray15", "turquoise4", "gray30", "turquoise3", "gray60", "turquoise2"), width=c(0.9, 0.9, 0.9, 0.9, 0.9, 0.9))
+
+points(x=plot_mtx_jitter[1,], y=control_TOR_amps_mtx[1,], pch=16)
+points(x=plot_mtx_jitter[3,], y=control_TOR_amps_mtx[2,], pch=15)
+points(x=plot_mtx_jitter[5,], y=control_TOR_amps_mtx[3,], pch=17)
+points(x=plot_mtx_jitter[2,], y=vta_amps_mtx[1,], pch=16)
+points(x=plot_mtx_jitter[4,], y=vta_amps_mtx[2,], pch=15)
+points(x=plot_mtx_jitter[6,], y=vta_amps_mtx[3,], pch=17)
+
+names_day1 <- matrix(1, nrow=1, ncol=ncol(control_TOR_amps_mtx))
+names_day2 <- matrix(2, nrow=1, ncol=ncol(control_TOR_amps_mtx))
+names_day3 <- matrix(3, nrow=1, ncol=ncol(control_TOR_amps_mtx))
+
+names_control <- matrix("wildtype", nrow=1, ncol=ncol(control_TOR_amps_mtx))
+
+data_ANOVA_control_d1 <- t(rbind(names_control, names_day1, control_TOR_amps_mtx[1,]))
+
+data_ANOVA_control_d2 <- t(rbind(names_control, names_day2, control_TOR_amps_mtx[2,]))
+
+data_ANOVA_control_d3 <- t(rbind(names_control, names_day3, control_TOR_amps_mtx[3,]))
+
+data_ANOVA_control <- rbind(data_ANOVA_control_d1, data_ANOVA_control_d2, data_ANOVA_control_d3)
+
+names_vta <- matrix("vta", nrow=1, ncol=ncol(vta_amps_mtx))
+
+data_ANOVA_vta_d1 <- t(rbind(names_vta, names_day1, vta_amps_mtx[1,]))
+
+data_ANOVA_vta_d2 <- t(rbind(names_vta, names_day2, vta_amps_mtx[2,]))
+
+data_ANOVA_vta_d3 <- t(rbind(names_vta, names_day3, vta_amps_mtx[3,]))
+
+data_ANOVA_vta <- rbind(data_ANOVA_vta_d1, data_ANOVA_vta_d2, data_ANOVA_vta_d3)
+
+data_ANOVA <- rbind(data_ANOVA_control, data_ANOVA_vta)
+
+data_ANOVA <- as.data.frame(data_ANOVA, stringsAsFactors=FALSE)
+
+names(data_ANOVA) <- c("Strain", "Day", "Amplitude")
+
+data_ANOVA$Amplitude <- as.numeric(data_ANOVA$Amplitude)
+
+aov0 <- aov(Amplitude ~ Strain + Day, data = data_ANOVA)
+## 2-way ANOVA with explanatory variables = Strain Genotype and Day 1-3, response variable = amplitude
+
+summary(aov0)
+
+TukeyHSD(aov0)
+
+data_ANOVA_d1 <- data_ANOVA[which(data_ANOVA$Day==1),]
+
+t.test(data_ANOVA_d1[which(data_ANOVA_d1$Strain=="wildtype"), 3], data_ANOVA_d1[which(data_ANOVA_d1$Strain=="vta"), 3])
+
+data_ANOVA_d2 <- data_ANOVA[which(data_ANOVA$Day==2),]
+
+t.test(data_ANOVA_d2[which(data_ANOVA_d2$Strain=="wildtype"), 3], data_ANOVA_d2[which(data_ANOVA_d2$Strain=="vta"), 3])
+
+data_ANOVA_d3 <- data_ANOVA[which(data_ANOVA$Day==3),]
+
+t.test(data_ANOVA_d3[which(data_ANOVA_d3$Strain=="wildtype"), 3], data_ANOVA_d3[which(data_ANOVA_d3$Strain=="vta"), 3])
+
+```
+
+### Export figure as SVG (700w x 550h) for text editing in Inkscape
+
+### Use Inkscape to re-center the individual measurements with the respective bar
+
+## Generate individual graphs for each genotype from race tube data
+
+```{r, fig.width=7, fig.height=5.5}
+
+xlabels<-seq(from=0,to=120,by=12)
+
+horolines<-seq(from=0,to=120,by=24)
+
+RT_data <- cbind(rep1_RT, rep2_RT[2:ncol(rep2_RT)])
+
+RT_data_rm1 <- cbind(RT_data[, 1:4], RT_data[, 6:ncol(RT_data)])
+## one trace of high glucose 18029 (vta) was anomalous by eye. When re-inspecting the raw data, this race tube had contaminating growth along both sides of the tube. Cycles # 1 - 3 look okay, but after this when the two fronts collide, the pattern appears incorrect compared to other replicate
+
+RT_data_smooth_avg <- compile_luc_traces(RT_data_rm1)
+
+## the genotype column values below are somewhat hard-coded
+
+######################################################
+
+## wild-type control low vs high glucose
+
+plot(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$wildtype_05g017a_avg), xlim=c(0,120), ylim=c(0,400), xaxt="n", type="l", lwd=5, col="goldenrod2", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(RT_data$TPs), y0=as.numeric(RT_data_smooth_avg$wildtype_05g017a_plus), y1=as.numeric(RT_data_smooth_avg$wildtype_05g017a_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$wildtype_05g017a_avg), lty="solid", lwd=5, col="goldenrod2")
+
+arrows(x0=as.numeric(RT_data$TPs), y0=as.numeric(RT_data_smooth_avg$wildtype_0g0a_plus), y1=as.numeric(RT_data_smooth_avg$wildtype_0g0a_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$wildtype_0g0a_avg), lty="solid", lwd=5, col="deepskyblue1")
+
+legend("topleft", c("high gluc", "zero gluc"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("goldenrod2", "deepskyblue1"))
+
+######################################################
+
+## FGSC18029 (delta vta/NCU05950) low vs high glucose
+
+plot(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$X18029_05g017a_avg), xlim=c(0,120), ylim=c(0,900), xaxt="n", type="l", lwd=5, col="goldenrod2", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(RT_data$TPs), y0=as.numeric(RT_data_smooth_avg$X18029_05g017a_plus), y1=as.numeric(RT_data_smooth_avg$X18029_05g017a_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$X18029_05g017a_avg), lty="solid", lwd=5, col="goldenrod2")
+
+arrows(x0=as.numeric(RT_data$TPs), y0=as.numeric(RT_data_smooth_avg$X18029_0g0a_plus), y1=as.numeric(RT_data_smooth_avg$X18029_0g0a_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$X18029_0g0a_avg), lty="solid", lwd=5, col="deepskyblue1")
+
+legend("topleft", c("high gluc", "zero gluc"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("goldenrod2", "deepskyblue1"))
+
+######################################################
+
+## FGSC16041 (delta gtr-2/NCU00376) low vs high glucose
+
+plot(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$X16041_05g017a_avg), xlim=c(0,120), ylim=c(0,1100), xaxt="n", type="l", lwd=5, col="goldenrod2", ylab="average bioluminescence (bckgr. corrected)", xlab="time (hours in constant darkness)")
+
+axis(1, at=xlabels, labels=TRUE, tick=TRUE)
+
+abline(v=horolines,lty=3,col="grey50")
+
+arrows(x0=as.numeric(RT_data$TPs), y0=as.numeric(RT_data_smooth_avg$X16041_05g017a_plus), y1=as.numeric(RT_data_smooth_avg$X16041_05g017a_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$X16041_05g017a_avg), lty="solid", lwd=5, col="goldenrod2")
+
+arrows(x0=as.numeric(RT_data$TPs), y0=as.numeric(RT_data_smooth_avg$X16041_0g0a_plus), y1=as.numeric(RT_data_smooth_avg$X16041_0g0a_minus), code=3, angle=90, length=0.01, col="grey50")
+
+lines(x=as.numeric(RT_data$TPs), y=as.numeric(RT_data_smooth_avg$X16041_0g0a_avg), lty="solid", lwd=5, col="deepskyblue1")
+
+legend("topleft", c("high gluc", "zero gluc"), bty="n", lty=c("solid", "solid"), lwd=c(2, 2), cex=c(0.8, 0.8), col=c("goldenrod2", "deepskyblue1"))
+
+######################################################
+
+```
+
+## Report the average +/- standard deviation period call for each genotype from race tube data
+
+Race tube experiment dates: 2025-02-17 & 2025-02-26
+
+```{r}
+
+control_TOR_0 <- periods_RT[which(periods_RT$Strain=="wildtype" & periods_RT$Media_Type=="0g0a"), ]
+
+gtr2_0 <- periods_RT[which(periods_RT$Strain=="16041" & periods_RT$Media_Type=="0g0a"), ]
+
+vta_0 <- periods_RT[which(periods_RT$Strain=="18029" & periods_RT$Media_Type=="0g0a"), ]
+
+print(paste("period length of mTOR controls on glucose starve:", round(mean(as.numeric(control_TOR_0$Period_R)), digits=1), "+/-", round(sd(as.numeric(control_TOR_0$Period_R)), digits=1), "from N =", nrow(control_TOR_0), "biological/technical replicates", sep=" "))
+
+print(paste("period length of delta gtr2 FGSC16041 on glucose starve:", round(mean(as.numeric(gtr2_0$Period_R)), digits=1), "+/-", round(sd(as.numeric(gtr2_0$Period_R)), digits=1), "from N =", nrow(gtr2_0), "biological/technical replicates", sep=" "))
+
+print(paste("period length of delta vta FGSC18029 on glucose starve:", round(mean(as.numeric(vta_0$Period_R)), digits=1), "+/-", round(sd(as.numeric(vta_0$Period_R)), digits=1), "from N =", nrow(vta_0), "biological/technical replicates", sep=" "))
+
+control_TOR_hi <- periods_RT[which(periods_RT$Strain=="wildtype" & periods_RT$Media_Type=="05g017a"), ]
+
+gtr2_hi <- periods_RT[which(periods_RT$Strain=="16041" & periods_RT$Media_Type=="05g017a"), ]
+
+vta_hi <- periods_RT[which(periods_RT$Strain=="18029" & periods_RT$Media_Type=="05g017a"), ]
+
+print(paste("period length of mTOR controls on high glucose:", round(mean(as.numeric(control_TOR_hi$Period_R)), digits=1), "+/-", round(sd(as.numeric(control_TOR_hi$Period_R)), digits=1), "from N =", nrow(control_TOR_hi), "biological/technical replicates", sep=" "))
+
+print(paste("period length of delta gtr2 FGSC16041 on high glucose:", round(mean(as.numeric(gtr2_hi$Period_R)), digits=1), "+/-", round(sd(as.numeric(gtr2_hi$Period_R)), digits=1), "from N =", nrow(gtr2_hi), "biological/technical replicates", sep=" "))
+
+print(paste("period length of delta vta FGSC18029 on high glucose:", round(mean(as.numeric(vta_hi$Period_R)), digits=1), "+/-", round(sd(as.numeric(vta_hi$Period_R)), digits=1), "from N =", nrow(vta_hi), "biological/technical replicates", sep=" "))
+
+```
+
+## For race tube experiments, compute the amplitude of the luciferase rhythm on days 1, 2, and 3 in mTOR mutants versus wild-type control
+
+Formula for amplitude: (peak - trough) / 2
+
+Using above sets of graphs:
+
+Day 1 = hours 8 - 24; trough # 1 and peak # 1
+Day 2 = hours 27 - 44; trough # 2 and peak # 2
+Day 3 = hours 50 - 68; trough # 3 and peak # 3
+
+```{r, fig.width=7, fig.height=5.5}
+
+RT_amps <- compute_amplitude(RT_data)
+## trace (*) removed from plotting in the above section is included here, cycles # 1 - 3 appeared mostly normal
+
+## the lines below are hard coded for each genotype of interest
+## WT high gluc = cols 1 - 3
+## WT 0 gluc = cols 4 - 6
+## vta high gluc = cols 13, 14*, 15
+## vta 0 gluc = cols 16 - 18
+
+control_TOR_amps_0 <- RT_amps[, 4:6]
+control_TOR_amps_hi <- RT_amps[, 1:3]
+
+vta_amps_0 <- RT_amps[, 16:18]
+vta_amps_hi <- RT_amps[, 13:15]
+
+control_TOR_amps_mtx_0 <- matrix(as.numeric(unlist(as.data.frame(control_TOR_amps_0))), nrow=nrow(control_TOR_amps_0))
+
+control_TOR_amps_mtx_hi <- matrix(as.numeric(unlist(as.data.frame(control_TOR_amps_hi))), nrow=nrow(control_TOR_amps_hi))
+
+vta_amps_mtx_0 <- matrix(as.numeric(unlist(as.data.frame(vta_amps_0))), nrow=nrow(vta_amps_0))
+
+vta_amps_mtx_hi <- matrix(as.numeric(unlist(as.data.frame(vta_amps_hi))), nrow=nrow(vta_amps_hi))
+
+control_TOR_amps_avg_0 <- apply(as.matrix(control_TOR_amps_mtx_0), 1, mean)
+control_TOR_amps_avg_hi <- apply(as.matrix(control_TOR_amps_mtx_hi), 1, mean)
+
+vta_amps_avg_0 <- apply(vta_amps_mtx_0, 1, mean)
+vta_amps_avg_hi <- apply(vta_amps_mtx_hi, 1, mean)
+
+max_val_0 <- max(c(control_TOR_amps_mtx_0, vta_amps_mtx_0))
+max_val_hi <- max(c(control_TOR_amps_mtx_hi, vta_amps_mtx_hi))
+
+plot_mtx <- matrix(nrow=6, ncol=3)
+plot_mtx[1,] <- 1
+plot_mtx[2,] <- 2
+plot_mtx[3,] <- 3
+plot_mtx[4,] <- 4
+plot_mtx[5,] <- 5
+plot_mtx[6,] <- 6
+
+barx <- barplot(c(control_TOR_amps_avg_0[1], vta_amps_avg_0[1], control_TOR_amps_avg_0[2], vta_amps_avg_0[2], control_TOR_amps_avg_0[3], vta_amps_avg_0[3]), ylim=c(0, max_val_0+max_val_0*0.1), col=c("gray15", "turquoise4", "gray30", "turquoise3", "gray60", "turquoise2"), width=c(0.9, 0.9, 0.9, 0.9, 0.9, 0.9), main="zero glucose amplitudes")
+
+points(x=plot_mtx[1,], y=control_TOR_amps_mtx_0[1,], pch=16)
+points(x=plot_mtx[3,], y=control_TOR_amps_mtx_0[2,], pch=15)
+points(x=plot_mtx[5,], y=control_TOR_amps_mtx_0[3,], pch=17)
+points(x=plot_mtx[2,], y=vta_amps_mtx_0[1,], pch=16)
+points(x=plot_mtx[4,], y=vta_amps_mtx_0[2,], pch=15)
+points(x=plot_mtx[6,], y=vta_amps_mtx_0[3,], pch=17)
+
+barx <- barplot(c(control_TOR_amps_avg_hi[1], vta_amps_avg_hi[1], control_TOR_amps_avg_hi[2], vta_amps_avg_hi[2], control_TOR_amps_avg_hi[3], vta_amps_avg_hi[3]), ylim=c(0, max_val_hi+max_val_hi*0.1), col=c("gray15", "turquoise4", "gray30", "turquoise3", "gray60", "turquoise2"), width=c(0.9, 0.9, 0.9, 0.9, 0.9, 0.9), main="high glucose amplitudes")
+
+points(x=plot_mtx[1,], y=control_TOR_amps_mtx_hi[1,], pch=16)
+points(x=plot_mtx[3,], y=control_TOR_amps_mtx_hi[2,], pch=15)
+points(x=plot_mtx[5,], y=control_TOR_amps_mtx_hi[3,], pch=17)
+points(x=plot_mtx[2,], y=vta_amps_mtx_hi[1,], pch=16)
+points(x=plot_mtx[4,], y=vta_amps_mtx_hi[2,], pch=15)
+points(x=plot_mtx[6,], y=vta_amps_mtx_hi[3,], pch=17)
+
+```
+
+## For race tube experiments, compute the amplitude of the luciferase rhythm on days 1, 2, and 3 in mTOR mutants versus wild-type control
+
+Formula for amplitude: (peak - trough) / 2
+
+Using above sets of graphs:
+
+Day 1 = hours 8 - 24; trough # 1 and peak # 1
+Day 2 = hours 27 - 44; trough # 2 and peak # 2
+Day 3 = hours 50 - 68; trough # 3 and peak # 3
+
+```{r, fig.width=7, fig.height=5.5}
+
+RT_amps <- compute_amplitude(RT_data)
+
+## the lines below are hard coded for each genotype of interest
+## WT high gluc = cols 1 - 3
+## WT 0 gluc = cols 4 - 6
+## gtr2 high gluc = cols 7 - 9
+## gtr2 0 gluc = cols 10 - 12
+
+control_TOR_amps_0 <- RT_amps[, 4:6]
+control_TOR_amps_hi <- RT_amps[, 1:3]
+
+gtr_amps_0 <- RT_amps[, 10:12]
+gtr_amps_hi <- RT_amps[, 7:9]
+
+control_TOR_amps_mtx_0 <- matrix(as.numeric(unlist(as.data.frame(control_TOR_amps_0))), nrow=nrow(control_TOR_amps_0))
+
+control_TOR_amps_mtx_hi <- matrix(as.numeric(unlist(as.data.frame(control_TOR_amps_hi))), nrow=nrow(control_TOR_amps_hi))
+
+gtr_amps_mtx_0 <- matrix(as.numeric(unlist(as.data.frame(gtr_amps_0))), nrow=nrow(gtr_amps_0))
+
+gtr_amps_mtx_hi <- matrix(as.numeric(unlist(as.data.frame(gtr_amps_hi))), nrow=nrow(gtr_amps_hi))
+
+control_TOR_amps_avg_0 <- apply(as.matrix(control_TOR_amps_mtx_0), 1, mean)
+control_TOR_amps_avg_hi <- apply(as.matrix(control_TOR_amps_mtx_hi), 1, mean)
+
+gtr_amps_avg_0 <- apply(gtr_amps_mtx_0, 1, mean)
+gtr_amps_avg_hi <- apply(gtr_amps_mtx_hi, 1, mean)
+
+max_val_0 <- max(c(control_TOR_amps_mtx_0, gtr_amps_mtx_0))
+max_val_hi <- max(c(control_TOR_amps_mtx_hi, gtr_amps_mtx_hi))
+
+plot_mtx <- matrix(nrow=6, ncol=3)
+plot_mtx[1,] <- 1
+plot_mtx[2,] <- 2
+plot_mtx[3,] <- 3
+plot_mtx[4,] <- 4
+plot_mtx[5,] <- 5
+plot_mtx[6,] <- 6
+
+barx <- barplot(c(control_TOR_amps_avg_0[1], gtr_amps_avg_0[1], control_TOR_amps_avg_0[2], gtr_amps_avg_0[2], control_TOR_amps_avg_0[3], gtr_amps_avg_0[3]), ylim=c(0, max_val_0+max_val_0*0.1), col=c("gray15", "turquoise4", "gray30", "turquoise3", "gray60", "turquoise2"), width=c(0.9, 0.9, 0.9, 0.9, 0.9, 0.9), main="zero glucose amplitudes")
+
+points(x=plot_mtx[1,], y=control_TOR_amps_mtx_0[1,], pch=16)
+points(x=plot_mtx[3,], y=control_TOR_amps_mtx_0[2,], pch=15)
+points(x=plot_mtx[5,], y=control_TOR_amps_mtx_0[3,], pch=17)
+points(x=plot_mtx[2,], y=gtr_amps_mtx_0[1,], pch=16)
+points(x=plot_mtx[4,], y=gtr_amps_mtx_0[2,], pch=15)
+points(x=plot_mtx[6,], y=gtr_amps_mtx_0[3,], pch=17)
+
+barx <- barplot(c(control_TOR_amps_avg_hi[1], gtr_amps_avg_hi[1], control_TOR_amps_avg_hi[2], gtr_amps_avg_hi[2], control_TOR_amps_avg_hi[3], gtr_amps_avg_hi[3]), ylim=c(0, max_val_hi+max_val_hi*0.1), col=c("gray15", "turquoise4", "gray30", "turquoise3", "gray60", "turquoise2"), width=c(0.9, 0.9, 0.9, 0.9, 0.9, 0.9), main="high glucose amplitudes")
+
+points(x=plot_mtx[1,], y=control_TOR_amps_mtx_hi[1,], pch=16)
+points(x=plot_mtx[3,], y=control_TOR_amps_mtx_hi[2,], pch=15)
+points(x=plot_mtx[5,], y=control_TOR_amps_mtx_hi[3,], pch=17)
+points(x=plot_mtx[2,], y=gtr_amps_mtx_hi[1,], pch=16)
+points(x=plot_mtx[4,], y=gtr_amps_mtx_hi[2,], pch=15)
+points(x=plot_mtx[6,], y=gtr_amps_mtx_hi[3,], pch=17)
+
+```

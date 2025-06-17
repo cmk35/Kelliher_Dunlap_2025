@@ -47,3 +47,8 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# manually added by CMK
+.DS_Store
+*.spe
+*.tif
